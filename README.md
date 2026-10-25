@@ -9,8 +9,10 @@ QQ 开放平台官方机器人：WebSocket 接收私聊（C2C）/群 @消息 →
 | `APP_ID` | ✅ | 开放平台 AppID | - |
 | `APP_SECRET` | ✅ | 开放平台 AppSecret | - |
 | `LLM_API_KEY` | ✅ | LLM 服务的 API Key | - |
-| `LLM_BASE_URL` | | OpenAI 兼容接口地址 | `https://open.bigmodel.cn/api/paas/v4` |
+| `LLM_API_MODE` | | `chat`（/chat/completions）或 `responses`（/responses） | `chat` |
+| `LLM_BASE_URL` | | 接口地址（到版本段为止） | `https://open.bigmodel.cn/api/paas/v4` |
 | `LLM_MODEL` | | 模型名 | `glm-4-flash` |
+| `LLM_REASONING` | | responses 模式思考强度 | `high` |
 | `SYSTEM_PROMPT` | | 机器人人设 | 简洁中文口语 |
 | `HISTORY_TURNS` | | 每会话记忆轮数 | `6` |
 | `COOLDOWN_MS` | | 单用户提问冷却 | `3000` |

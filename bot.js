@@ -7,9 +7,11 @@ const {
   PORT = '8080',
   APP_ID = '',
   APP_SECRET = '',
+  LLM_API_MODE = 'chat',        // 'chat' = {base}/chat/completions；'responses' = {base}/responses
   LLM_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4', // 任意 OpenAI 兼容接口
   LLM_API_KEY = '',
   LLM_MODEL = 'glm-4-flash',
+  LLM_REASONING = 'high',       // responses 模式的思考强度：minimal/low/medium/high
   SYSTEM_PROMPT = '你是一个友好的 QQ 聊天机器人，用简洁自然的中文口语回答，不要用 markdown 格式。',
   HISTORY_TURNS = '6',     // 每个会话保留的对话轮数
   COOLDOWN_MS = '3000',    // 同一用户两次提问最小间隔
@@ -51,15 +53,29 @@ async function qqApi(method, path, body) {
   return text ? JSON.parse(text) : null;
 }
 
-// ---------- LLM（OpenAI 兼容 /chat/completions） ----------
+// ---------- LLM（chat completions 或 responses 两种模式） ----------
 async function chatLLM(messages) {
-  const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
+  const base = LLM_BASE_URL.replace(/\/$/, '');
+  const isResponses = LLM_API_MODE === 'responses';
+  const res = await fetch(isResponses ? `${base}/responses` : `${base}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
-    body: JSON.stringify({ model: LLM_MODEL, messages }),
+    body: JSON.stringify(isResponses
+      ? { model: LLM_MODEL, input: messages, reasoning: { effort: LLM_REASONING } }
+      : { model: LLM_MODEL, messages }),
   });
   if (!res.ok) throw new Error(`LLM API ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  return (await res.json()).choices[0].message.content.trim();
+  const data = await res.json();
+  if (!isResponses) return data.choices[0].message.content.trim();
+  const text = (data.output ?? [])
+    .filter((o) => o.type === 'message')
+    .flatMap((o) => o.content ?? [])
+    .filter((c) => c.type === 'output_text')
+    .map((c) => c.text)
+    .join('')
+    .trim();
+  if (!text) throw new Error(`responses API 无文本输出: ${JSON.stringify(data).slice(0, 200)}`);
+  return text;
 }
 
 // ---------- 会话状态 ----------
