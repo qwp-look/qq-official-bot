@@ -1,0 +1,13 @@
+{
+  "name": "qq-official-bot",
+  "version": "1.0.0",
+  "description": "QQ official bot (Open Platform): WebSocket events -> LLM API -> passive reply",
+  "type": "module",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
