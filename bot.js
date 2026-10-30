@@ -16,6 +16,11 @@ const {
   HISTORY_TURNS = '6',     // 每个会话保留的对话轮数
   COOLDOWN_MS = '3000',    // 同一用户两次提问最小间隔
   MAX_REPLY_CHARS = '1500',
+  AGENT_URL = '',          // infrlo agent 地址；留空则禁用工具
+  AGENT_TOKEN = '',        // agent Bearer token
+  PING_URLS = '',          // 逗号分隔，定时 ping 保活（如 infrlo agent 地址）
+  PING_INTERVAL_MS = '240000',
+  TEST_MESSAGE = '',       // 调试：启动后模拟一条用户消息（仅本地测试用）
 } = process.env;
 
 if (!APP_ID || !APP_SECRET) { console.error('缺少 APP_ID / APP_SECRET'); process.exit(1); }
@@ -78,6 +83,42 @@ async function chatLLM(messages) {
   return text;
 }
 
+// ---------- Agent 工具调用（LLM 输出 JSON 行 -> 调 infrlo agent -> 结果回填） ----------
+const AGENT_TOOLS_PROMPT = [
+  '# 远程服务器工具',
+  '你可以操作一台联网的 Linux 服务器。确需执行操作时，在回复中单独输出一行 JSON（该行只含 JSON，不要加代码块标记）：',
+  '{"tool":"run","command":"<shell 命令>"} 在服务器上执行 shell 命令',
+  '{"tool":"fetch","url":"<http(s) 地址>"} 让服务器抓取网页并返回正文',
+  '系统会以 TOOL_RESULT 消息返回结果，之后你根据结果用简洁自然的中文回答用户。',
+  '日常闲聊或不需要工具时直接回答，禁止输出 JSON。',
+].join('\n');
+
+function extractToolCall(text) {
+  for (const line of String(text).split('\n')) {
+    const t = line.trim();
+    if (!t.startsWith('{') || !t.includes('"tool"')) continue;
+    try {
+      const obj = JSON.parse(t);
+      if (obj.tool === 'run' && obj.command) return obj;
+      if (obj.tool === 'fetch' && obj.url) return obj;
+    } catch { /* 该行不是合法 JSON，继续 */ }
+  }
+  return null;
+}
+
+async function agentTool(call) {
+  const path = call.tool === 'run' ? '/run' : '/fetch';
+  const body = call.tool === 'run' ? { command: String(call.command).slice(0, 2000) } : { url: String(call.url) };
+  const res = await fetch(`${AGENT_URL.replace(/\/$/, '')}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${AGENT_TOKEN}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(90000),
+  });
+  const data = await res.json();
+  return JSON.stringify(data).slice(0, 3500);
+}
+
 // ---------- 会话状态 ----------
 const histories = new Map();  // key -> [{role, content}]
 const cooldowns = new Map();  // openid -> last ts
@@ -105,9 +146,25 @@ async function handleMessage({ key, authorId, text, msgId, sendPath }) {
   history.push({ role: 'user', content: text });
   console.log(`[${key}] ${authorId}: ${text}`);
 
-  let answer;
+  const sys = { role: 'system', content: AGENT_URL ? `${SYSTEM_PROMPT}\n${AGENT_TOOLS_PROMPT}` : SYSTEM_PROMPT };
+  const messages = [sys, ...history.slice(-Number(HISTORY_TURNS) * 2)];
+  let answer = null;
   try {
-    answer = await chatLLM([{ role: 'system', content: SYSTEM_PROMPT }, ...history.slice(-Number(HISTORY_TURNS) * 2)]);
+    // 工具循环：LLM 可输出最多 3 次工具调用，结果回填后继续生成
+    for (let round = 0; round < 3; round++) {
+      answer = await chatLLM(messages);
+      const call = AGENT_URL ? extractToolCall(answer) : null;
+      if (!call) break;
+      console.log(`[${key}] tool round ${round + 1}: ${JSON.stringify(call).slice(0, 150)}`);
+      let result;
+      try { result = await agentTool(call); } catch (err) { result = JSON.stringify({ error: err.message }); }
+      messages.push({ role: 'assistant', content: answer }, { role: 'user', content: `TOOL_RESULT: ${result}` });
+      answer = null;
+    }
+    if (!answer) {
+      messages.push({ role: 'user', content: '（工具调用次数已达上限，请根据已有信息直接用中文回答，不要再调用工具）' });
+      answer = await chatLLM(messages);
+    }
   } catch (err) {
     console.error('LLM error:', err.message);
     answer = '（AI 接口出错了，稍后再试）';
@@ -234,5 +291,30 @@ const onConnErr = (e) => {
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' }).end(`qq official bot ok\nseq=${seq} session=${sessionId ? 'yes' : 'no'}\n`);
 }).listen(Number(PORT), () => console.log(`health server on :${PORT}, starting websocket...`));
+
+// ---------- 双向保活：定时 ping（如 infrlo agent） ----------
+if (PING_URLS) {
+  const urls = PING_URLS.split(',').map((s) => s.trim()).filter(Boolean);
+  setInterval(async () => {
+    for (const u of urls) {
+      try {
+        const r = await fetch(u, { signal: AbortSignal.timeout(15000) });
+        console.log(`[keepalive] ${u} -> ${r.status}`);
+      } catch (e) { console.error(`[keepalive] ${u} failed: ${e.message}`); }
+    }
+  }, Number(PING_INTERVAL_MS)).unref?.();
+  console.log(`keepalive pinger on: ${urls.join(', ')}`);
+}
+
+console.log(AGENT_URL ? `agent enabled: ${AGENT_URL}` : 'agent disabled (no AGENT_URL)');
+
+// ---------- 调试钩子：模拟一条用户消息（仅本地测试用） ----------
+if (TEST_MESSAGE) {
+  setTimeout(() => {
+    handleMessage({ key: 'u:test', authorId: 'test', text: TEST_MESSAGE, msgId: `test_${Date.now()}`, sendPath: '/v2/users/test/messages' })
+      .catch((e) => console.error('test message error:', e.message))
+      .finally(() => console.log('TEST_MESSAGE done'));
+  }, 3000);
+}
 
 connect().catch(onConnErr);
